@@ -5,9 +5,8 @@
 # Purpose: Cluster production readiness:
 #          1. Flannel CNI (10.244.0.0/16) and Node Ready gate
 #          2. NGINX Ingress Controller DaemonSet with NodePort 30080
-#          3. ALB /healthz responder & Ingress for immediate Target Group Health
-#          4. Metrics Server with --kubelet-insecure-tls
-#          5. 'prod' namespace creation & ECR 12-hour auto-refresh CronJob + Init Job
+#          3. Metrics Server with --kubelet-insecure-tls
+#          4. 'prod' namespace creation & ECR 12-hour auto-refresh CronJob + Init Job
 # =============================================================================
 
 - name: Ensure addons manifest staging directory exists on master
@@ -29,7 +28,7 @@
 
 - name: Wait for all Kubernetes nodes to reach Ready status
   ansible.builtin.command: >
-    kubectl --kubeconfig=/etc/kubernetes/admin.conf wait --for=condition=Ready nodes --all --timeout=300s
+    kubectl --kubeconfig=/etc/kubernetes/admin.conf wait --for=condition=Ready nodes --all --timeout=180s
   register: nodes_ready
   changed_when: false
   retries: 5
@@ -54,32 +53,24 @@
   changed_when: "'created' in ingress_apply.stdout or 'configured' in ingress_apply.stdout"
 
 # -----------------------------------------------------------------------------
-# 3. CRITICAL ALB Health Check Fix: Ingress & Responder for /healthz on 30080
+# 3. Clean Up Legacy Conflicting /healthz Ingress Resources
 # -----------------------------------------------------------------------------
-- name: Render ALB /healthz responder and Ingress manifest
-  ansible.builtin.template:
-    src: nginx-healthz-ingress.yml.j2
-    dest: /etc/kubernetes/addons/nginx-healthz-ingress.yml
-    owner: root
-    group: root
-    mode: '0644'
-
-- name: Apply ALB /healthz responder and Ingress manifest
+- name: Clean up legacy conflicting alb-healthz resources from ingress-nginx namespace
   ansible.builtin.command: >
-    kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f /etc/kubernetes/addons/nginx-healthz-ingress.yml
-  register: healthz_apply
-  changed_when: "'created' in healthz_apply.stdout or 'configured' in healthz_apply.stdout"
+    kubectl --kubeconfig=/etc/kubernetes/admin.conf delete
+    ingress/alb-healthz-ingress
+    svc/alb-healthz-svc
+    svc/alb-healthz-responder
+    deployment/alb-healthz-responder
+    configmap/alb-healthz-html
+    -n ingress-nginx --ignore-not-found=true
+  register: cleanup_healthz
+  changed_when: "'deleted' in cleanup_healthz.stdout"
 
 - name: Wait for Ingress NGINX DaemonSet rollout
   ansible.builtin.command: >
     kubectl --kubeconfig=/etc/kubernetes/admin.conf rollout status daemonset/ingress-nginx-controller -n ingress-nginx --timeout=180s
   register: ingress_rollout
-  changed_when: false
-
-- name: Wait for ALB healthz responder deployment rollout
-  ansible.builtin.command: >
-    kubectl --kubeconfig=/etc/kubernetes/admin.conf rollout status deployment/alb-healthz-responder -n ingress-nginx --timeout=120s
-  register: responder_rollout
   changed_when: false
 
 # -----------------------------------------------------------------------------

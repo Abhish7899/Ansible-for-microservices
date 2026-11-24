@@ -22,7 +22,7 @@ filters:
 # Keyed groups based on EC2 tag "Role":
 # Produces 'role_k8s_master' and 'role_k8s_worker'
 keyed_groups:
-  - key: tags.Role
+  - key: ec2_tags.Role
     prefix: role
     separator: "_"
 
