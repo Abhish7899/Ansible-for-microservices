@@ -15,7 +15,7 @@
   ansible.builtin.command: >
     kubeadm init
     --pod-network-cidr={{ pod_network_cidr }}
-    --apiserver-advertise-address={{ private_ip | default(ansible_default_ipv4.address) }}
+    --apiserver-advertise-address={{ private_ip | default(ansible_facts['default_ipv4']['address']) }}
   args:
     creates: /etc/kubernetes/admin.conf
   register: kubeadm_init_result
