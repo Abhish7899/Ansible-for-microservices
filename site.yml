@@ -1,0 +1,76 @@
+---
+# =============================================================================
+# Stage 2 Orchestrator Playbook: Vanilla Kubernetes (kubeadm v1.31) on AWS SSM
+# =============================================================================
+# Manages end-to-end configuration for:
+# - Pre-flight inventory assertions (prevents silent 0-host green runs)
+# - Common OS, kernel, containerd, and kubeadm v1.31 bootstrap
+# - Control plane initialization (master) and cluster join token extraction
+# - Worker node join execution
+# - Cluster addons: Flannel CNI, Ingress NGINX DaemonSet (30080), ALB /healthz
+#   responder, Metrics Server, and ECR 12-hour auto-refresh CronJob.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Play 0: Pre-Flight Guard on Dynamic Inventory
+# -----------------------------------------------------------------------------
+- name: "Play 0: Pre-Flight Inventory Validation & Node Count Assertion"
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: Assert exact target node topology exists in SSM dynamic inventory
+      ansible.builtin.assert:
+        that:
+          - "groups['role_k8s_master'] is defined"
+          - "groups['role_k8s_master'] | length == 1"
+          - "groups['role_k8s_worker'] is defined"
+          - "groups['role_k8s_worker'] | length >= 1"
+        fail_msg: >-
+          Pre-flight check failed! Expected exactly 1 master and at least 1 worker node
+          in dynamic inventory groups 'role_k8s_master' and 'role_k8s_worker'.
+          Found masters: {{ groups['role_k8s_master'] | default([]) | length }},
+          Found workers: {{ groups['role_k8s_worker'] | default([]) | length }}.
+          Verify EC2 instances are online and SSM agent is active.
+        success_msg: >-
+          Pre-flight assertion passed! Found {{ groups['role_k8s_master'] | length }} master node(s)
+          and {{ groups['role_k8s_worker'] | length }} worker node(s) ready for bootstrap.
+
+# -----------------------------------------------------------------------------
+# Play 1: Common OS, Runtime & Kubernetes Package Preparation (All Nodes)
+# -----------------------------------------------------------------------------
+- name: "Play 1: Common OS, Containerd Runtime & Kubernetes v1.31 Setup"
+  hosts: role_k8s_master:role_k8s_worker
+  gather_facts: false
+  become: true
+  roles:
+    - common
+
+# -----------------------------------------------------------------------------
+# Play 2: Control Plane Initialization & Join Token Generation (Master Node)
+# -----------------------------------------------------------------------------
+- name: "Play 2: Initialize Kubernetes Control Plane & Export Join Token"
+  hosts: role_k8s_master
+  gather_facts: true
+  become: true
+  roles:
+    - master
+
+# -----------------------------------------------------------------------------
+# Play 3: Worker Nodes Cluster Join (Worker Nodes)
+# -----------------------------------------------------------------------------
+- name: "Play 3: Join Worker Nodes to Kubernetes Cluster"
+  hosts: role_k8s_worker
+  gather_facts: true
+  become: true
+  roles:
+    - worker
+
+# -----------------------------------------------------------------------------
+# Play 4: Production Addons & ALB Integration (Master Node)
+# -----------------------------------------------------------------------------
+- name: "Play 4: Deploy Cluster Addons, Ingress ALB Healthz & ECR Auto-Refresh"
+  hosts: role_k8s_master
+  gather_facts: false
+  become: true
+  roles:
+    - addons

@@ -1,0 +1,88 @@
+---
+# =============================================================================
+# Role: master
+# Target: role_k8s_master (1x c7i-flex.large)
+# Purpose: Initialize Kubernetes control plane idempotently, configure root
+#          and ubuntu user kubeconfigs, and generate fresh cluster join tokens.
+# =============================================================================
+
+- name: Check if Kubernetes control plane is already initialized
+  ansible.builtin.stat:
+    path: /etc/kubernetes/admin.conf
+  register: k8s_admin_conf
+
+- name: Initialize Kubernetes Control Plane via kubeadm
+  ansible.builtin.command: >
+    kubeadm init
+    --pod-network-cidr={{ pod_network_cidr }}
+    --apiserver-advertise-address={{ private_ip | default(ansible_default_ipv4.address) }}
+  args:
+    creates: /etc/kubernetes/admin.conf
+  register: kubeadm_init_result
+
+# -----------------------------------------------------------------------------
+# Setup Kubeconfig for root and ubuntu users
+# -----------------------------------------------------------------------------
+- name: Ensure /root/.kube directory exists
+  ansible.builtin.file:
+    path: /root/.kube
+    state: directory
+    owner: root
+    group: root
+    mode: '0700'
+
+- name: Copy admin.conf to /root/.kube/config
+  ansible.builtin.copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /root/.kube/config
+    remote_src: true
+    owner: root
+    group: root
+    mode: '0600'
+
+- name: Check if ubuntu user exists
+  ansible.builtin.getent:
+    database: passwd
+    key: ubuntu
+  ignore_errors: true
+  register: ubuntu_user_check
+
+- name: Ensure /home/ubuntu/.kube directory exists
+  ansible.builtin.file:
+    path: /home/ubuntu/.kube
+    state: directory
+    owner: ubuntu
+    group: ubuntu
+    mode: '0700'
+  when: ubuntu_user_check is succeeded
+
+- name: Copy admin.conf to /home/ubuntu/.kube/config
+  ansible.builtin.copy:
+    src: /etc/kubernetes/admin.conf
+    dest: /home/ubuntu/.kube/config
+    remote_src: true
+    owner: ubuntu
+    group: ubuntu
+    mode: '0600'
+  when: ubuntu_user_check is succeeded
+
+# -----------------------------------------------------------------------------
+# Generate Fresh Cluster Join Command (Idempotent for Zero-Downtime Re-runs)
+# -----------------------------------------------------------------------------
+- name: Generate a fresh cluster join token and command
+  ansible.builtin.command: kubeadm token create --print-join-command
+  register: k8s_join_raw
+  changed_when: false
+
+- name: Register join command fact for worker nodes
+  ansible.builtin.set_fact:
+    k8s_join_command: "{{ k8s_join_raw.stdout | trim }}"
+    cacheable: true
+
+- name: Verify master node API server health
+  ansible.builtin.command: kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes
+  register: kubectl_get_nodes
+  changed_when: false
+  retries: 6
+  delay: 10
+  until: kubectl_get_nodes.rc == 0

@@ -1,0 +1,119 @@
+---
+# =============================================================================
+# ECR Authentication Token 12-Hour Auto-Refresh RBAC & CronJob
+# =============================================================================
+# Amazon ECR authentication tokens expire every 12 hours. This CronJob runs
+# every 6 hours using the EC2 IAM Instance Profile attached to the worker/master
+# node to retrieve a fresh token and update 'ecr-registry-secret' in the
+# application namespace ('{{ app_namespace }}'), eliminating ImagePullBackOff.
+# =============================================================================
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: ecr-token-refresher
+  namespace: {{ app_namespace }}
+  labels:
+    app.kubernetes.io/name: ecr-token-refresher
+    app.kubernetes.io/part-of: stage2-ansible
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: ecr-secret-manager
+  namespace: {{ app_namespace }}
+  labels:
+    app.kubernetes.io/name: ecr-token-refresher
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ecr-secret-manager-binding
+  namespace: {{ app_namespace }}
+  labels:
+    app.kubernetes.io/name: ecr-token-refresher
+subjects:
+  - kind: ServiceAccount
+    name: ecr-token-refresher
+    namespace: {{ app_namespace }}
+roleRef:
+  kind: Role
+  name: ecr-secret-manager
+  apiGroup: rbac.authorization.k8s.io
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ecr-token-refresh
+  namespace: {{ app_namespace }}
+  labels:
+    app.kubernetes.io/name: ecr-token-refresher
+    app.kubernetes.io/part-of: stage2-ansible
+spec:
+  schedule: "{{ ecr_token_refresh_cron }}"
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: ecr-token-refresher
+        spec:
+          serviceAccountName: ecr-token-refresher
+          hostNetwork: true
+          dnsPolicy: ClusterFirstWithHostNet
+          restartPolicy: OnFailure
+          containers:
+            - name: ecr-refresher
+              image: amazon/aws-cli:latest
+              command:
+                - /bin/sh
+                - -c
+                - |
+                  set -euo pipefail
+                  echo "[INFO] Starting automated ECR auth refresh for region {{ aws_region }}..."
+
+                  # Ensure kubectl is available
+                  if ! command -v kubectl >/dev/null 2>&1; then
+                    echo "[INFO] Installing kubectl client binary..."
+                    curl -sSL "https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl" -o /tmp/kubectl
+                    chmod +x /tmp/kubectl
+                    KUBECTL="/tmp/kubectl"
+                  else
+                    KUBECTL="kubectl"
+                  fi
+
+                  # Extract AWS Account ID via STS using IAM Instance Profile credentials
+                  AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query "Account" --output text)
+                  ECR_SERVER="${AWS_ACCOUNT_ID}.dkr.ecr.{{ aws_region }}.amazonaws.com"
+                  echo "[INFO] Identified AWS Account: ${AWS_ACCOUNT_ID}"
+                  echo "[INFO] ECR Registry Target: ${ECR_SERVER}"
+
+                  # Generate ECR login password
+                  ECR_TOKEN=$(aws ecr get-login-password --region {{ aws_region }})
+
+                  # Atomically create or update the Kubernetes Docker registry secret
+                  ${KUBECTL} create secret docker-registry {{ ecr_registry_secret_name }} \
+                    --docker-server="${ECR_SERVER}" \
+                    --docker-username="AWS" \
+                    --docker-password="${ECR_TOKEN}" \
+                    --namespace="{{ app_namespace }}" \
+                    --dry-run=client -o yaml | ${KUBECTL} apply -f -
+
+                  echo "[SUCCESS] Secret '{{ ecr_registry_secret_name }}' refreshed in namespace '{{ app_namespace }}'."
+              resources:
+                requests:
+                  cpu: 20m
+                  memory: 32Mi
+                limits:
+                  cpu: 100m
+                  memory: 128Mi

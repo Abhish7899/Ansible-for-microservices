@@ -1,0 +1,4 @@
+ansible-core==2.21.6
+boto3==1.44.10
+botocore
+pyyaml

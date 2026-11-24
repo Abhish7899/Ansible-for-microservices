@@ -1,0 +1,189 @@
+---
+# =============================================================================
+# Role: addons
+# Target: role_k8s_master (1x c7i-flex.large)
+# Purpose: Cluster production readiness:
+#          1. Flannel CNI (10.244.0.0/16) and Node Ready gate
+#          2. NGINX Ingress Controller DaemonSet with NodePort 30080
+#          3. ALB /healthz responder & Ingress for immediate Target Group Health
+#          4. Metrics Server with --kubelet-insecure-tls
+#          5. 'prod' namespace creation & ECR 12-hour auto-refresh CronJob + Init Job
+# =============================================================================
+
+- name: Ensure addons manifest staging directory exists on master
+  ansible.builtin.file:
+    path: /etc/kubernetes/addons
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+# -----------------------------------------------------------------------------
+# 1. CNI: Flannel Networking (10.244.0.0/16)
+# -----------------------------------------------------------------------------
+- name: Apply Flannel CNI manifest
+  ansible.builtin.command: >
+    kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f {{ flannel_manifest_url }}
+  register: flannel_apply
+  changed_when: "'created' in flannel_apply.stdout or 'configured' in flannel_apply.stdout"
+
+- name: Wait for all Kubernetes nodes to reach Ready status
+  ansible.builtin.command: >
+    kubectl --kubeconfig=/etc/kubernetes/admin.conf wait --for=condition=Ready nodes --all --timeout=300s
+  register: nodes_ready
+  changed_when: false
+  retries: 5
+  delay: 10
+  until: nodes_ready.rc == 0
+
+# -----------------------------------------------------------------------------
+# 2. Ingress Controller: NGINX DaemonSet on Worker Nodes (Port 30080)
+# -----------------------------------------------------------------------------
+- name: Render Ingress NGINX DaemonSet manifest
+  ansible.builtin.template:
+    src: ingress-nginx-daemonset.yml.j2
+    dest: /etc/kubernetes/addons/ingress-nginx.yml
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Apply Ingress NGINX DaemonSet manifest
+  ansible.builtin.command: >
+    kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f /etc/kubernetes/addons/ingress-nginx.yml
+  register: ingress_apply
+  changed_when: "'created' in ingress_apply.stdout or 'configured' in ingress_apply.stdout"
+
+# -----------------------------------------------------------------------------
+# 3. CRITICAL ALB Health Check Fix: Ingress & Responder for /healthz on 30080
+# -----------------------------------------------------------------------------
+- name: Render ALB /healthz responder and Ingress manifest
+  ansible.builtin.template:
+    src: nginx-healthz-ingress.yml.j2
+    dest: /etc/kubernetes/addons/nginx-healthz-ingress.yml
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Apply ALB /healthz responder and Ingress manifest
+  ansible.builtin.command: >
+    kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f /etc/kubernetes/addons/nginx-healthz-ingress.yml
+  register: healthz_apply
+  changed_when: "'created' in healthz_apply.stdout or 'configured' in healthz_apply.stdout"
+
+- name: Wait for Ingress NGINX DaemonSet rollout
+  ansible.builtin.command: >
+    kubectl --kubeconfig=/etc/kubernetes/admin.conf rollout status daemonset/ingress-nginx-controller -n ingress-nginx --timeout=180s
+  register: ingress_rollout
+  changed_when: false
+
+- name: Wait for ALB healthz responder deployment rollout
+  ansible.builtin.command: >
+    kubectl --kubeconfig=/etc/kubernetes/admin.conf rollout status deployment/alb-healthz-responder -n ingress-nginx --timeout=120s
+  register: responder_rollout
+  changed_when: false
+
+# -----------------------------------------------------------------------------
+# 4. Metrics Server with --kubelet-insecure-tls
+# -----------------------------------------------------------------------------
+- name: Render Metrics Server manifest
+  ansible.builtin.template:
+    src: metrics-server.yml.j2
+    dest: /etc/kubernetes/addons/metrics-server.yml
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Apply Metrics Server manifest
+  ansible.builtin.command: >
+    kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f /etc/kubernetes/addons/metrics-server.yml
+  register: metrics_apply
+  changed_when: "'created' in metrics_apply.stdout or 'configured' in metrics_apply.stdout"
+
+- name: Wait for Metrics Server deployment rollout
+  ansible.builtin.command: >
+    kubectl --kubeconfig=/etc/kubernetes/admin.conf rollout status deployment/metrics-server -n kube-system --timeout=180s
+  register: metrics_rollout
+  changed_when: false
+
+# -----------------------------------------------------------------------------
+# 5. App Namespace & ECR 12-Hour Token Auto-Refresh CronJob
+# -----------------------------------------------------------------------------
+- name: Ensure application namespace exists
+  ansible.builtin.command: >
+    kubectl --kubeconfig=/etc/kubernetes/admin.conf create namespace {{ app_namespace }} --dry-run=client -o yaml
+  register: ns_manifest
+  changed_when: false
+
+- name: Apply application namespace
+  ansible.builtin.command: >
+    kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f -
+  args:
+    stdin: "{{ ns_manifest.stdout }}"
+  register: ns_apply
+  changed_when: "'created' in ns_apply.stdout"
+
+- name: Render ECR token auto-refresh RBAC and CronJob manifest
+  ansible.builtin.template:
+    src: ecr-refresh-cronjob.yml.j2
+    dest: /etc/kubernetes/addons/ecr-refresh-cronjob.yml
+    owner: root
+    group: root
+    mode: '0644'
+
+- name: Apply ECR token auto-refresh CronJob manifest
+  ansible.builtin.command: >
+    kubectl --kubeconfig=/etc/kubernetes/admin.conf apply -f /etc/kubernetes/addons/ecr-refresh-cronjob.yml
+  register: ecr_cron_apply
+  changed_when: "'created' in ecr_cron_apply.stdout or 'configured' in ecr_cron_apply.stdout"
+
+- name: Check if ECR registry secret already exists in namespace
+  ansible.builtin.command: >
+    kubectl --kubeconfig=/etc/kubernetes/admin.conf get secret {{ ecr_registry_secret_name }} -n {{ app_namespace }}
+  register: ecr_secret_check
+  failed_when: false
+  changed_when: false
+
+- name: Delete existing init job if present before triggering fresh immediate token fetch
+  ansible.builtin.command: >
+    kubectl --kubeconfig=/etc/kubernetes/admin.conf delete job ecr-token-refresh-init -n {{ app_namespace }} --ignore-not-found=true
+  when: ecr_secret_check.rc != 0
+  changed_when: true
+
+- name: Trigger immediate initial ECR token refresh Job
+  ansible.builtin.command: >
+    kubectl --kubeconfig=/etc/kubernetes/admin.conf create job --from=cronjob/ecr-token-refresh ecr-token-refresh-init -n {{ app_namespace }}
+  when: ecr_secret_check.rc != 0
+  register: init_job_trigger
+  changed_when: true
+
+- name: Wait for initial ECR registry secret creation in application namespace
+  ansible.builtin.command: >
+    kubectl --kubeconfig=/etc/kubernetes/admin.conf get secret {{ ecr_registry_secret_name }} -n {{ app_namespace }}
+  register: wait_ecr_secret
+  retries: 24
+  delay: 5
+  until: wait_ecr_secret.rc == 0
+  changed_when: false
+
+# -----------------------------------------------------------------------------
+# 6. Final Stage 2 Cluster Health and Readiness Verification
+# -----------------------------------------------------------------------------
+- name: Output Kubernetes cluster node status
+  ansible.builtin.command: >
+    kubectl --kubeconfig=/etc/kubernetes/admin.conf get nodes -o wide
+  register: cluster_nodes_status
+  changed_when: false
+
+- name: Display Cluster Nodes
+  ansible.builtin.debug:
+    var: cluster_nodes_status.stdout_lines
+
+- name: Output Ingress and Addons Pod status
+  ansible.builtin.command: >
+    kubectl --kubeconfig=/etc/kubernetes/admin.conf get pods -A -o wide
+  register: all_pods_status
+  changed_when: false
+
+- name: Display All Pods
+  ansible.builtin.debug:
+    var: all_pods_status.stdout_lines

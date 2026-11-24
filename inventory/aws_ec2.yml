@@ -1,0 +1,37 @@
+---
+# =============================================================================
+# Dynamic EC2 Inventory Plugin for AWS Systems Manager (SSM) Connection
+# =============================================================================
+# Filters strictly by Project, Environment, and Role tags to isolate Stage 2
+# Kubernetes cluster instances from any other instances in the AWS account.
+# =============================================================================
+
+plugin: amazon.aws.aws_ec2
+regions:
+  - ap-southeast-2
+
+# Strict tag and state filtering (isolates from separate Ansible Control Node or unrelated instances)
+filters:
+  tag:Project: task-stats-microservices
+  tag:Environment: prod
+  tag:Role:
+    - k8s-master
+    - k8s-worker
+  instance-state-name: running
+
+# Keyed groups based on EC2 tag "Role":
+# Produces 'role_k8s_master' and 'role_k8s_worker'
+keyed_groups:
+  - key: tags.Role
+    prefix: role
+    separator: "_"
+
+# Host variable composition for keyless SSM connection via S3 staging bucket
+compose:
+  ansible_connection: "'community.aws.aws_ssm'"
+  ansible_aws_ssm_instance_id: instance_id
+  ansible_aws_ssm_region: "'ap-southeast-2'"
+  ansible_aws_ssm_bucket_name: "'e-commerce-artifactory'"
+  ansible_aws_ssm_bucket_prefix: "'ansible-ssm'"
+  ansible_aws_ssm_s3_addressing_style: "'virtual'"
+  private_ip: private_ip_address

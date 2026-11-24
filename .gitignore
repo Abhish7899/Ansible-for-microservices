@@ -1,0 +1,24 @@
+# Ansible retry files
+*.retry
+
+# Python bytecode and virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+.venv/
+venv/
+ENV/
+env/
+
+# Ansible local cache & temp
+.ansible/
+*.log
+
+# OS & Editor artifacts
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo

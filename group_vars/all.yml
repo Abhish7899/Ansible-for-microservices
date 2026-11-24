@@ -1,0 +1,52 @@
+---
+# =============================================================================
+# Global Group Variables - Stage 2 Kubernetes Bootstrap Configuration
+# =============================================================================
+
+# AWS Environment Specification
+aws_region: "ap-southeast-2"
+environment_name: "prod"
+project_name: "task-stats-microservices"
+
+# AWS Systems Manager & S3 Artifactory Transport Configuration
+ssm_bucket_name: "e-commerce-artifactory"
+ssm_bucket_prefix: "ansible-ssm"
+ansible_aws_ssm_s3_addressing_style: "virtual"
+
+# Kubernetes Version & Repository Pinning
+k8s_version: "1.31"
+k8s_apt_repo_url: "https://pkgs.k8s.io/core:/stable:/v1.31/deb/"
+k8s_apt_key_url: "https://pkgs.k8s.io/core:/stable:/v1.31/deb/Release.key"
+k8s_packages:
+  - kubelet
+  - kubeadm
+  - kubectl
+
+# Networking & Cluster CIDRs
+pod_network_cidr: "10.244.0.0/16"
+service_cidr: "10.96.0.0/12"
+cluster_name: "prod-vanilla-k8s"
+
+# Target Node Counts & Validation
+expected_master_count: 1
+expected_worker_count: 2
+
+# Ingress Controller & Port Mapping (Aligned with Stage 1 Public ALB)
+ingress_http_nodeport: 30080
+ingress_nginx_version: "v1.11.3"
+
+# Metrics Server Configuration
+metrics_server_version: "v0.7.2"
+
+# Flannel CNI Configuration
+flannel_cni_version: "v0.25.7"
+flannel_manifest_url: "https://raw.githubusercontent.com/flannel-io/flannel/v0.25.7/Documentation/kube-flannel.yml"
+
+# Application Namespace & ECR Token Auto-Refresh
+app_namespace: "prod"
+ecr_token_refresh_cron: "0 */6 * * *"
+ecr_registry_secret_name: "ecr-registry-secret"
+
+# APT & Package Management Safeguards
+apt_lock_timeout: 300
+apt_cache_valid_time: 3600

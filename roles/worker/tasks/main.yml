@@ -1,0 +1,25 @@
+---
+# =============================================================================
+# Role: worker
+# Target: role_k8s_worker (2x t3.small)
+# Purpose: Idempotently join worker nodes to the Kubernetes cluster using the
+#          dynamically generated join command from the master node.
+# =============================================================================
+
+- name: Check if worker node is already joined to cluster
+  ansible.builtin.stat:
+    path: /etc/kubernetes/kubelet.conf
+  register: k8s_kubelet_conf
+
+- name: Join worker node to Kubernetes cluster
+  ansible.builtin.command: "{{ hostvars[groups['role_k8s_master'][0]]['k8s_join_command'] }}"
+  args:
+    creates: /etc/kubernetes/kubelet.conf
+  when: not k8s_kubelet_conf.stat.exists
+  register: worker_join_result
+
+- name: Ensure kubelet service is started and enabled on worker
+  ansible.builtin.systemd:
+    name: kubelet
+    state: started
+    enabled: true
