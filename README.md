@@ -204,9 +204,21 @@ ansible-playbook site.yml
 
 ---
 
-## 🔄 CI/CD Pipeline (GitHub Actions)
+## 🔄 CI/CD Pipelines
 
-The repository includes `.github/workflows/stage2-ansible.yml` configured with AWS OpenID Connect (OIDC):
+### 1. Declarative Jenkins Pipeline (`Jenkinsfile`)
+A production-grade `Jenkinsfile` at the repository root tailored for Jenkins controllers/agents running on AWS EC2 with an attached IAM Instance Profile:
+- **Portable Virtual Environment:** Uses `${HOME}/ansible-venv` (safe for the `jenkins` user), auto-creating it and installing dependencies if missing.
+- **Stage 1 (Pre-Flight & Tooling Bootstrap):** Validates AWS STS identity, `session-manager-plugin`, and bootstraps Ansible with collections.
+- **Stage 2 (Syntax & Inventory Verification):** Validates `site.yml` syntax and verifies dynamic inventory discovers `role_k8s_master` and `role_k8s_worker`.
+- **Stage 3 (SSM Connectivity Check):** Runs `ansible all -m ping` over SSM transport before modifying cluster nodes.
+- **Stage 4 (Bootstrap & Configure):** Runs `ansible-playbook site.yml`.
+- **Stage 5 (Post-Configure Exit Gate):**
+  - Confirms nodes are `Ready` and `ecr-registry-secret` is present in `prod` namespace.
+  - Polls AWS ALB Target Group (`k8s-ingress-tg-prod`) until both worker nodes report `healthy`.
+  - Runs `curl -sfI "http://${ALB_DNS}/healthz"` to confirm `200 OK`.
+
+### 2. GitHub Actions (`.github/workflows/stage2-ansible.yml`)
 1. **Trigger:** On `push` to `main` branch or manual `workflow_dispatch`.
 2. **AWS OIDC Authentication:** Uses `aws-actions/configure-aws-credentials@v4` with `AWS_ROLE_ARN` secret.
 3. **Automated Setup:** Installs `session-manager-plugin`, Python dependencies, and Ansible collections.
